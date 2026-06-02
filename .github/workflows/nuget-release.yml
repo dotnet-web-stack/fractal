@@ -1,0 +1,57 @@
+name: NuGet Release
+
+# Triggers:
+#   - Push a tag matching `v*` (e.g. `v0.1.0`) → packs and publishes that version.
+#   - Manual run via the Actions tab (workflow_dispatch) → publishes whatever
+#     version is currently set in fractal/fractal.csproj.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          # If a stable 10.0.x isn't yet on the action's manifest, flip include-prerelease.
+          include-prerelease: true
+
+      - name: Derive version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "PKG_VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+
+      - name: Restore
+        run: dotnet restore fractal/fractal.csproj
+
+      - name: Build
+        run: dotnet build fractal/fractal.csproj -c Release --no-restore
+
+      - name: Pack (tag-driven version)
+        if: env.PKG_VERSION != ''
+        run: dotnet pack fractal/fractal.csproj -c Release --no-build -o nupkgs -p:Version=${{ env.PKG_VERSION }}
+
+      - name: Pack (csproj version)
+        if: env.PKG_VERSION == ''
+        run: dotnet pack fractal/fractal.csproj -c Release --no-build -o nupkgs
+
+      - name: Push to NuGet
+        # --skip-duplicate so re-running the workflow on an existing version is a no-op
+        # rather than a hard error. NUGET_API_KEY is a repo secret you must create
+        # (Settings → Secrets → Actions → New secret).
+        run: dotnet nuget push 'nupkgs/*.nupkg' --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Upload artifacts
+        # Keep the .nupkg/.snupkg in the run artifacts for download even if push fails.
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkgs
+          path: nupkgs/*

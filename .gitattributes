@@ -1,0 +1,8 @@
+# GitHub Linguist overrides — control what shows in the repo "Languages" bar.
+#
+# Mark everything as vendored (excluded from stats), then re-include only the
+# fractal/ library. The Playground, CI yml, docs, etc. stay tracked but don't
+# inflate the language percentages.
+
+* linguist-vendored
+fractal/** linguist-vendored=false

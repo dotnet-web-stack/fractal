@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <RootNamespace>Fractal</RootNamespace>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <PackageId>fractal</PackageId>
+        <Version>0.1.0</Version>
+        <Authors>Diogo Martins</Authors>
+        <Description>An ultra-high-performance Linux io_uring file reactor — pure inline thread-per-core, serving network and file I/O on one ring per core. Ships a drop-in HTTP/1.1 static-file handler (Glyph11 request parsing, pre-compressed Accept-Encoding negotiation) on top of the wire-agnostic reactor core.</Description>
+        <PackageTags>linux;io-uring;reactor;networking;file;static-files;thread-per-core;high-performance</PackageTags>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <RepositoryType>git</RepositoryType>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="..\README.md" Pack="true" PackagePath="\" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Glyph11" Version="0.3.3" />
+    </ItemGroup>
+
+</Project>

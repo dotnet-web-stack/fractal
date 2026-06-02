@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="fractal/fractal.csproj" />
+  <Project Path="fractal.Playground/fractal.Playground.csproj" />
+  <Project Path="aspnet-bench/aspnet-bench.csproj" />
+</Solution>

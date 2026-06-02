@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fractal — an io_uring file reactor</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <header>
+    <h1>fractal</h1>
+    <p class="tagline">An ultra-high-performance Linux io_uring file reactor — pure inline
+    thread-per-core, serving network and file I/O on a single ring per core.</p>
+  </header>
+
+  <main>
+    <section>
+      <h2>Thread-per-core, shared nothing</h2>
+      <p>fractal spawns one reactor per CPU. Each reactor owns its own io_uring instance, its own
+      <code>SO_REUSEPORT</code> listening socket, and its own map of live connections. The kernel
+      load-balances incoming connections across the reactors, and because no connection is ever
+      shared between threads, the hot path runs with no locks and no cross-thread synchronization.
+      A connection accepted on reactor three is read, served, and torn down entirely on reactor
+      three's thread; it never migrates, never contends, never waits on a shared data structure.</p>
+      <p>This is the same shared-nothing model used by Seastar, Glommio, and TigerBeetle, brought to
+      .NET on top of io_uring. The reactor thread is the sole writer of the submission queue, the
+      sole writer of the kernel-shared provided-buffer ring, and the sole owner of the connection
+      pool. There is exactly one producer for every ring the reactor touches, which is what lets
+      fractal request <code>IORING_SETUP_SINGLE_ISSUER</code> and <code>DEFER_TASKRUN</code> from
+      the kernel and skip an entire layer of internal locking.</p>
+    </section>
+
+    <section>
+      <h2>A file reactor, not just a network reactor</h2>
+      <p>What makes fractal a <em>file</em> reactor is that disk reads ride the same ring as the
+      network. Accept, receive, send, and file read are all submitted to one io_uring per core and
+      told apart by a tag packed into each completion's user data. A connection can read a file
+      straight into its own send buffer with <code>ReadFileAsync</code> without ever leaving the
+      reactor — the read becomes one more submission on the ring it is already draining.</p>
+      <p>On a warm page cache the read completes almost instantly and the handler resumes inline; on
+      a cold miss the kernel services it asynchronously while the reactor keeps making progress on
+      every other connection, instead of stalling the whole core on a single blocking read. The
+      file's bytes flow from the page cache into the connection's write slab and back out to the
+      socket without the application thread ever blocking on disk.</p>
+    </section>
+
+    <section>
+      <h2>Inline execution with IValueTaskSource</h2>
+      <p>Everything runs inline on the reactor thread. Each connection's receive, file read, and
+      flush are completed by the reactor through an <code>IValueTaskSource</code>, so an
+      <code>async</code> handler suspends and resumes on that same thread with no thread-pool hops.
+      You write ordinary <code>async</code>/<code>await</code> code, and it executes with the
+      throughput of a hand-written event loop. When the reactor reaps a completion, it sets the
+      result on the waiting value-task source synchronously, and the handler's continuation runs
+      immediately, on the spot, before the reactor moves to the next completion in the batch.</p>
+      <p>There is no captured synchronization context, no posting to a scheduler, no boxing of state
+      machines onto the heap on the steady-state path. The connection owns a small pool of reusable
+      value-task sources — one for receive, one for the file read, one for the flush — and rotates
+      through them request after request on a keep-alive connection.</p>
+    </section>
+
+    <section>
+      <h2>Pre-opening the whole directory</h2>
+      <p>At startup the static-file handler walks its root directory once, opens every file, and
+      records each file's descriptor, byte size, and URL path in an <code>AssetCache</code> that
+      lives for the process. Serving a request never opens, stats, or closes a file — the descriptor
+      is already there, and io_uring reads it positionally, so the same asset is served concurrently
+      from every reactor without any per-request file-system syscall on the hot path.</p>
+      <p>The trade-off is that one descriptor is held open per file for the cache's lifetime, so very
+      large trees want a raised <code>RLIMIT_NOFILE</code>. The model fits immutable deploys
+      perfectly: build your assets, pre-compress them, point fractal at the directory, and every
+      lookup thereafter is a dictionary hit plus a single ring submission.</p>
+    </section>
+
+    <section>
+      <h2>Hardened request parsing</h2>
+      <p>Requests are parsed with Glyph11's ultra-hardened parser, which validates structure against
+      RFC 9110 and 9112 and throws on any protocol or semantic violation. Ambiguous framing such as
+      a request carrying both <code>Transfer-Encoding</code> and <code>Content-Length</code> — the
+      classic request-smuggling vector — is rejected outright, and so is any target containing
+      dot-segments that would try to climb out of the served root.</p>
+      <p>The parsed method, path, version, query, and headers are exposed as zero-copy slices into
+      the receive buffer, and the request object is cleared and reused between requests on a
+      keep-alive connection rather than reallocated. A malformed request never reaches the routing
+      logic: it is turned into a clean error response before a file is ever looked up.</p>
+    </section>
+
+    <section>
+      <h2>Transparent compression negotiation</h2>
+      <p>fractal serves pre-compressed assets rather than compressing on the fly, which keeps the
+      whole zero-touch file path intact — the server simply chooses a different descriptor. If a
+      request arrives with <code>Accept-Encoding: br</code> and a sibling file ending in
+      <code>.br</code> exists in the cache, that variant is served with
+      <code>Content-Encoding: br</code>; otherwise it falls back to <code>gzip</code>, then to the
+      identity file. Quality values are honored, so an encoding marked <code>q=0</code> is treated
+      as an explicit rejection and skipped.</p>
+      <p>Every response advertises <code>Vary: Accept-Encoding</code> so that shared caches store the
+      variants correctly. Because the compressed files are generated ahead of time as part of your
+      build or deploy step, the CPU cost of compression is paid once, offline, instead of on every
+      request — exactly the trade-off a static file server should make.</p>
+      <ul>
+        <li>Brotli is preferred over gzip when both are acceptable.</li>
+        <li>Missing variants fall through gracefully to the next best option.</li>
+        <li>Content-Type is derived from the underlying file's extension, not the encoding.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Connection lifecycle</h2>
+      <p>Connections are pooled. On accept the reactor pops a connection object from a per-reactor
+      stack — or allocates a fresh one if the pool is empty — and arms a multishot receive against
+      the kernel's provided-buffer ring. A small reference count tracks the two owners of the
+      connection, the reactor and the in-flight handler, so that teardown happens exactly once, on
+      the reactor thread, after both are finished even if a close races in mid-request.</p>
+      <p>When the connection is recycled its write slab and receive ring are reset rather than freed,
+      and it goes back on the pool ready for the next accept. Steady-state traffic therefore touches
+      the allocator almost not at all: buffers, connection objects, and value-task sources are all
+      reused, and the per-request cost collapses to parsing, a cache lookup, and the file read.</p>
+    </section>
+
+    <section>
+      <h2>What to expect</h2>
+      <p>Against a warm page cache the file read completes inside the submission syscall, so a
+      request is essentially parse, look up, and a couple of ring operations that the reactor batches
+      with everyone else's. Throughput scales close to linearly with cores because the reactors share
+      nothing; latency stays low because nothing on the path blocks or hops threads. Numbers measured
+      over loopback reflect memory bandwidth rather than a real network, so treat them as an upper
+      bound and benchmark over a real link for production figures.</p>
+      <p>For deployment: pre-compress your assets, raise the open-file limit to comfortably exceed
+      your asset count, and run on a reasonably recent kernel so the io_uring features fractal relies
+      on are present. The reactor core stays close to the metal, and the HTTP layer is a thin,
+      optional convenience on top of it.</p>
+    </section>
+  </main>
+
+  <footer>
+    <p>Requires Linux (io_uring) and .NET 10. fractal is MIT-licensed and built as a small,
+    auditable building block.</p>
+  </footer>
+</body>
+</html>

@@ -55,3 +55,17 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+# JetBrains Rider / IntelliJ
+.idea/
+*.iml
+*.sln.DotSettings.user
+
+# Visual Studio / VS Code
+.vs/
+*.user
+.vscode/
+
+# macOS
+.DS_Store
+
